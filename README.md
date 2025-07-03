@@ -2,6 +2,8 @@
 
 A browser-based test application demonstrating persistent storage capabilities of DuckDB WebAssembly using Origin Private File System (OPFS).
 
+<img width="478" alt="image" src="https://github.com/user-attachments/assets/675875c9-94ac-461d-970f-dc9dcf8ce9f7" />
+
 ## Overview
 
 This test application showcases:
