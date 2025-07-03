@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+    <h1>DuckDB OPFS Persistence Test</h1>
+    
+    <div>
+        <button id="initNewBtn">Initialize New OPFS DB</button>
+        <button id="initPersistentBtn">Initialize from existing OPFS DB</button>
+        <button id="addRowBtn">Add Rows to Table</button>
+        <button id="printTableBtn">Print Test Table</button>
+    </div>
+    
+    <div id="status">Ready...</div>
+    <div id="results"></div>
+
+    <script type="module">
+        // Import DuckDB WebAssembly module from CDN. 
+        // NOTE: as of 2025-07-04 OPFS is not supported in duckdb wasm 1.29 but are implemented in dev builds starting from dev68
+        import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.1-dev68.0/+esm";
+
+        // Configuration constants
+        const DB_PATH = "opfs://test.db";  // OPFS (Origin Private File System) path for persistent storage
+        const TABLE_NAME = "test_table"; 
+        
+        // Global variables to maintain database connection across button clicks
+        let db, conn;
+
+        /**
+         * Creates a new DuckDB instance with WebAssembly workers
+         * This sets up the DuckDB engine that can run in the browser
+         */
+        async function createDuckDBInstance() {
+            // Get the best bundle for the current browser/environment
+            const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
+            const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
+            
+            // Create a Web Worker for DuckDB operations (runs in background thread)
+            const worker_url = URL.createObjectURL(
+                new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })
+            );
+            const worker = new Worker(worker_url);
+            
+            // Set up logging (only show errors to keep console clean)
+            const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.ERROR);
+            
+            // Create and initialize the DuckDB instance
+            const newDb = new duckdb.AsyncDuckDB(logger, worker);
+            await newDb.instantiate(bundle.mainModule, bundle.pthreadWorker);
+            
+            // Clean up the temporary worker URL
+            URL.revokeObjectURL(worker_url);
+            
+            return newDb;
+        }
+
+        /**
+         * Initialize a completely new database with OPFS persistence
+         * This clears any existing data and creates a fresh database
+         */
+        async function initializeNewDB() {
+            const statusDiv = document.getElementById("status");
+            
+            try {
+                statusDiv.innerHTML = "Creating new DuckDB with OPFS persistence...";
+                
+                // Step 1: Clean up any existing database connections
+                if (conn) await conn.close();
+                if (db) await db.terminate();
+                
+                // Step 2: Clear all OPFS storage to ensure we start fresh  
+                // (DuckDB may create multiple files, so we clear everything)
+                const root = await navigator.storage.getDirectory();
+                for await (const [name] of root.entries()) {
+                    await root.removeEntry(name, { recursive: true });
+                }
+                
+                // Step 3: Create new DuckDB instance
+                db = await createDuckDBInstance();
+                
+                // Step 4: Open database with OPFS persistence at specified path
+                await db.open({
+                    path: DB_PATH,
+                    accessMode: duckdb.DuckDBAccessMode.READ_WRITE
+                });
+                
+                // Step 5: Create connection to the database
+                conn = await db.connect();
+                
+                // Step 6: Create initial table structure and add sample data
+                await conn.query(`CREATE TABLE ${TABLE_NAME} (id INTEGER, name TEXT)`);
+                await conn.query(`INSERT INTO ${TABLE_NAME} VALUES (1, 'Initial Row')`);
+                
+                statusDiv.innerHTML = "✅ New DB created with OPFS persistence";
+                
+            } catch (error) {
+                console.error("Error:", error);
+                statusDiv.innerHTML = `❌ Error: ${error.message}`;
+            }
+        }
+
+        /**
+         * Initialize connection to an existing database stored in OPFS
+         * This connects to a database that was previously created
+         */
+        async function initializePersistentDB() {
+            const statusDiv = document.getElementById("status");
+            
+            try {
+                statusDiv.innerHTML = "Connecting to existing OPFS DB...";
+                
+                // Step 1: Clean up any existing database connections
+                if (conn) await conn.close();
+                if (db) await db.terminate();
+                
+                // Step 2: Create new DuckDB instance
+                db = await createDuckDBInstance();
+                
+                // Step 3: Open existing database from OPFS storage
+                await db.open({
+                    path: DB_PATH,
+                    accessMode: duckdb.DuckDBAccessMode.READ_WRITE
+                });
+                
+                // Step 4: Create connection to the database
+                conn = await db.connect();
+                
+                // Step 5: Verify that our expected table exists
+                try {
+                    await conn.query(`SELECT COUNT(*) FROM ${TABLE_NAME}`);
+                    statusDiv.innerHTML = "✅ Connected to existing OPFS DB";
+                } catch {
+                    // Table doesn't exist, which means no previous database was found
+                    statusDiv.innerHTML = "❌ No existing persistent DB found";
+                }
+                
+            } catch (error) {
+                console.error("Error:", error);
+                statusDiv.innerHTML = `❌ Error: ${error.message}`;
+            }
+        }
+
+        /**
+         * Add a new row to the test table
+         * Creates the table if it doesn't exist, then adds a numbered row
+         */
+        async function addRowToTable() {
+            const statusDiv = document.getElementById("status");
+            
+            try {
+                // Step 1: Check if we have an active database connection
+                if (!conn) {
+                    statusDiv.innerHTML = "❌ No database connection - initialize DB first";
+                    return;
+                }
+                
+                statusDiv.innerHTML = "Adding row to table...";
+                
+                // Step 2: Ensure table exists (create if missing)
+                await conn.query(`CREATE TABLE IF NOT EXISTS ${TABLE_NAME} (id INTEGER, name TEXT)`);
+                
+                // Step 3: Calculate the next ID by finding the current maximum ID
+                const maxIdResult = await conn.query(`SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM ${TABLE_NAME}`);
+                const nextId = maxIdResult.toArray()[0].next_id;
+                
+                // Step 4: Insert new row with incremented ID
+                await conn.query(`INSERT INTO ${TABLE_NAME} VALUES (${nextId}, 'Row ${nextId}')`);
+                
+                statusDiv.innerHTML = `✅ Added row ${nextId} to table`;
+                
+            } catch (error) {
+                console.error("Error:", error);
+                statusDiv.innerHTML = `❌ Error: ${error.message}`;
+            }
+        }
+
+        /**
+         * Display all rows from the test table in an HTML table
+         * Shows "No table found" message if table doesn't exist
+         */
+        async function printTestTable() {
+            const statusDiv = document.getElementById("status");
+            const resultsDiv = document.getElementById("results");
+            
+            try {
+                // Step 1: Check if we have an active database connection
+                if (!conn) {
+                    statusDiv.innerHTML = "❌ No database connection - initialize DB first";
+                    resultsDiv.innerHTML = "";
+                    return;
+                }
+                
+                statusDiv.innerHTML = "Reading table...";
+                
+                // Step 2: Try to query the table and display results
+                try {
+                    // Query all rows from the table, ordered by ID
+                    const result = await conn.query(`SELECT * FROM ${TABLE_NAME} ORDER BY id`);
+                    const data = result.toArray();
+                    
+                    // Step 3: Build HTML table to display the data
+                    let html = "<h3>Test Table:</h3><table border='1'><tr><th>ID</th><th>Name</th></tr>";
+                    data.forEach(row => {
+                        html += `<tr><td>${row.id}</td><td>${row.name}</td></tr>`;
+                    });
+                    html += "</table>";
+                    
+                    // Step 4: Display the table and update status
+                    resultsDiv.innerHTML = html;
+                    statusDiv.innerHTML = `✅ Table printed (${data.length} rows)`;
+                    
+                } catch {
+                    // Table doesn't exist
+                    resultsDiv.innerHTML = "<h3>No table found</h3>";
+                    statusDiv.innerHTML = "❌ Table doesn't exist";
+                }
+                
+            } catch (error) {
+                console.error("Error:", error);
+                statusDiv.innerHTML = `❌ Error: ${error.message}`;
+                resultsDiv.innerHTML = "";
+            }
+        }
+
+        // Attach event handlers to buttons
+        document.getElementById("initNewBtn").onclick = initializeNewDB;
+        document.getElementById("initPersistentBtn").onclick = initializePersistentDB;
+        document.getElementById("addRowBtn").onclick = addRowToTable;
+        document.getElementById("printTableBtn").onclick = printTestTable;
+    </script>
+</body>
+</html> 
